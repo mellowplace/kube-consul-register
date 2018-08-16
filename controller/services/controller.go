@@ -481,6 +481,50 @@ func (c *Controller) eventAddFunc(obj interface{}) error {
 				}
 			}
 		}
+
+	case v1.ServiceTypeLoadBalancer:
+		lbIngresses := obj.(*v1.Service).Status.LoadBalancer.Ingress
+
+		for _, port := range obj.(*v1.Service).Spec.Ports {
+			if port.Protocol == v1.ProtocolTCP {
+				ports = append(ports, port.Port)
+			}
+		}
+
+		for _, lbIngress := range lbIngresses {
+
+			lbAddress := lbIngress.IP
+			if len(lbIngress.Hostname) > 0 {
+				lbAddress = lbIngress.Hostname
+				glog.V(3).Infof("Found FQDN %s for LB", lbAddress)
+			}
+
+			for _, port := range ports {
+				// Add to Consul
+				service, err := c.createConsulService(obj.(*v1.Service), lbAddress, port)
+				if err != nil {
+					glog.Errorf("Cannot create Consul service: %s", err)
+					continue
+				}
+				// Check if service's already added
+				if _, ok := allAddedServices[service.ID]; ok {
+					glog.V(3).Infof("Service %s has already registered in Consul", service.ID)
+					continue
+				}
+
+				consulAgent := c.consulInstance.New(c.cfg, lbAddress, "")
+				err = consulAgent.Register(service)
+				if err != nil {
+					glog.Errorf("Cannot register service in Consul: %s", err)
+					metrics.ConsulFailure.WithLabelValues("register", consulAgent.Config.Address).Inc()
+				} else {
+					allAddedServices[service.ID] = true
+					glog.Infof("Service %s has been registered in Consul with ID: %s", obj.(*v1.Service).ObjectMeta.Name, service.ID)
+					metrics.ConsulSuccess.WithLabelValues("register", consulAgent.Config.Address).Inc()
+				}
+			}
+		}
+
 	}
 	return nil
 }
